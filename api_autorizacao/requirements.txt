@@ -1,0 +1,7 @@
+fastapi==0.68.0
+uvicorn==0.15.0
+pydantic==1.8.2
+psycopg2-binary==2.9.3
+requests==2.31.0
+pyjwt==2.4.0
+asyncpg==0.29.0

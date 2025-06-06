@@ -1,0 +1,181 @@
+services:
+  db:
+  
+    image: postgres:13
+    environment:
+      POSTGRES_DB: sistema_bancario
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sistema_bancario"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - app-network
+      
+  bacen_db:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: bacen_bancario
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./sql/bacen_init.sql:/docker-entrypoint-initdb.d/01-bacen_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bacen_bancario"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - app-network
+  
+  eventos:
+    build: ./api_eventos
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_data_lake:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8001"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  tokenizacao:
+    build: ./api_tokenizacao
+    ports:
+      - "8002:8002"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_tokenizacao:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8002"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  antifraude:
+    build: ./api_antifraude
+    ports:
+      - "8003:8003"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_antifraude:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8003"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  autorizacao:
+    build: ./api_autorizacao
+    ports:
+      - "8004:8004"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_autenticacao:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8004"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  liquidacao:
+    build: ./api_liquidacao
+    ports:
+      - "8005:8005"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_liquidacoes:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8005"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  negacao:
+    build: ./api_negacao
+    ports:
+      - "8006:8006"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_autenticacao:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8006"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  analytics:
+    build: ./api_analytics
+    ports:
+      - "8007:8007"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=1234
+      - DB_HOST=db
+      - DATABASE_URL=postgresql://api_data_lake:1234@db:5432/sistema_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8007"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  bacen:
+    build: ./api_bacen
+    ports:
+      - "8008:8008"
+    depends_on:
+      bacen_db:
+        condition: service_healthy
+    environment:
+      - DB_PASSWORD=senha_bacen
+      - DB_HOST=bacen_db
+      - DATABASE_URL=postgresql://api_bacen:senha_bacen@bacen_db:5432/bacen_bancario
+      - JWT_SECRET_KEY=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef123456
+    command: ["sh", "-c", "sleep 60 && uvicorn main:app --host 0.0.0.0 --port 8008"]
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
