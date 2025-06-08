@@ -8,6 +8,7 @@ import jwt
 import uuid
 import json
 import os
+import logging
 
 app = FastAPI(title="Antifraude Service")
 
@@ -17,6 +18,12 @@ if not SECRET_KEY:
     raise ValueError("JWT_SECRET_KEY environment variable not set")
 ALGORITHM = "HS256"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+
+logger = logging.getLogger("antifraude")
+logging.basicConfig(level=logging.INFO)
+
+def gerar_id_uuid():
+    return str(uuid.uuid4())
 
 pool = None
 
@@ -58,10 +65,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 @app.post("/api/analise")
 async def transaction(
+    id_usuario: str,
     id_transacao: str,
     id_cartao: str,
     valor: float,
-    data_transacao: str
+    data_transacao: str,
+    local_transacao: str
 ):
     async with pool.acquire() as conn:
         try:
@@ -86,8 +95,8 @@ async def transaction(
             if recent_transactions[0]['count'] >= 5: 
                 suspicious_factors.append("frequencia_alta")
             
-            if recent_transactions[0]['total'] and \
-               recent_transactions[0]['total'] + valor >= 15000:  
+            total = float(recent_transactions[0]['total'] or 0)
+            if total + valor >= 15000:
                 suspicious_factors.append("volume_alto_periodo")
 
           
@@ -125,32 +134,39 @@ async def transaction(
                     suspicious_factors.append("transacoes_rapidas")
 
            
+            is_suspicious = len(suspicious_factors) >= 1  
+           
             await conn.execute(
                 """
                 INSERT INTO antifraude.transacoes 
-                (id_transacao, id_cartao, valor, data_transacao)
-                VALUES ($1, $2, $3, $4)
+                (id_transacao, id_cartao, id_usuario, valor, data_transacao, status_transacao, local_transacao)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
                 id_transacao,
                 id_cartao,
+                id_usuario,
                 valor,
-                datetime.fromisoformat(data_transacao)
+                datetime.fromisoformat(data_transacao),
+                'rejeitada' if is_suspicious else 'aprovada',
+                local_transacao
             )
 
            
-            is_suspicious = len(suspicious_factors) >= 1  
+            
 
+            id_analise = gerar_id_uuid()
           
             await conn.execute(
                 """
                 INSERT INTO antifraude.analise_fraude 
-                (id_transacao, resultado_analise, score_fraude, data_analise)
-                VALUES ($1, $2, $3, $4)
+                (id_analise, id_transacao, resultado_analise, score_fraude, data_analise)
+                VALUES ($1, $2, $3, $4, $5)
                 """,
+                id_analise,
                 id_transacao,
-                'suspeita' if is_suspicious else 'normal',
-                len(suspicious_factors),
-                datetime.now()
+                'suspeita' if is_suspicious else 'segura',
+                float(len(suspicious_factors)),
+                datetime.fromisoformat(data_transacao)
             )
 
             return {
@@ -161,20 +177,27 @@ async def transaction(
             }
 
         except Exception as e:
-          
-            await conn.execute(
-                """
-                INSERT INTO antifraude.analise_fraude 
-                (id_transacao, resultado_analise, score_fraude, data_analise)
-                VALUES ($1, $2, $3, $4)
-                """,
-                id_transacao,
-                'erro',
-                0,
-                datetime.now()
-            )
             
+            try:
+                id_analise = gerar_id_uuid()
+                await conn.execute(
+                    """
+                    INSERT INTO antifraude.analise_fraude 
+                    (id_analise, id_transacao, resultado_analise, score_fraude, data_analise)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    id_analise,
+                    id_transacao,
+                    'erro',
+                    0,
+                    datetime.now()
+                )
+            
+            except Exception as log_error:
+                print(f"Erro ao registrar falha: {log_error}")
+            logger.exception(f"Erro na aintifraude: {str(e)}")
             raise HTTPException(
+                
                 status_code=500,
                 detail=f"Erro na análise antifraude: {str(e)}"
             )

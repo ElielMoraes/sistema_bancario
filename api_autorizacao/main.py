@@ -8,6 +8,7 @@ import uuid
 import json
 import os
 import requests
+import logging
 
 app = FastAPI(title="Autenticação Service")
 
@@ -18,7 +19,8 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
-
+logger = logging.getLogger("autenticacao")
+logging.basicConfig(level=logging.INFO)
 pool = None
 
 @app.on_event("startup")
@@ -59,6 +61,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         return id_usuario
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    
+async def gerar_id_autorizacao_serial(conn) -> str:
+    resultado = await conn.fetchval("""
+        SELECT MAX(CAST(SUBSTRING(id_autorizacao FROM '[0-9]+$') AS INTEGER))
+        FROM autenticacao.autorizacoes
+    """)
+    proximo_id = (resultado or 0) + 1
+    return f"autorizacao_{proximo_id}"
 
 @app.post("/token")
 async def login(id_usuario: str):
@@ -71,11 +81,14 @@ async def transaction(
     id_transacao: str,
     id_cartao: str,
     id_usuario: str,
-    valor: float
+    valor: float,
+    data_transacao: str,
+    local_transacao: str
 ):
+    
     async with pool.acquire() as conn:
         try:
-          
+         
             card_result = await conn.fetchrow(
                 """
                 SELECT status_cartao
@@ -85,14 +98,13 @@ async def transaction(
                 id_cartao,
                 id_usuario
             )
-            
             if not card_result:
                 raise HTTPException(status_code=404, detail="Cartão não encontrado")
-            
-            if card_result['status'] != 'ativo':
+
+            if card_result['status_cartao'] != 'ativo':
                 raise HTTPException(status_code=400, detail="Cartão inativo")
 
-          
+           
             limit_result = await conn.fetchrow(
                 """
                 SELECT limite_disponivel 
@@ -101,61 +113,47 @@ async def transaction(
                 """,
                 id_cartao
             )
-            
             if not limit_result or limit_result['limite_disponivel'] < valor:
-                raise HTTPException(status_code=400, detail="Limite indisponível")
-
-         
-            try:
+                status_autorizacao = "negada"
+            else:
                 fraud_response = requests.post(
                     "http://antifraude:8003/api/analise",
                     params={
+                        "id_usuario": id_usuario,
                         "id_transacao": id_transacao,
                         "id_cartao": id_cartao,
                         "valor": valor,
-                        "data_transacao": datetime.now().isoformat()
+                        "data_transacao": datetime.now().isoformat(),
+                        "local_transacao": local_transacao
                     },
                     timeout=5
                 )
                 fraud_response.raise_for_status()
                 fraud_result = fraud_response.json()
 
-                if fraud_result['status'] == 'suspeita':
-                  
-                    await conn.execute(
-                        """
-                        INSERT INTO autenticacao.autorizacoes 
-                        (id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
-                        VALUES ($1, $2, $3, $4, $5)
-                        """,
-                        id_transacao,
-                        id_cartao,
-                        valor,
-                        'negada',
-                        datetime.now()
-                    )
-                    
-                    return AuthorizationResponse(
-                        id_transacao=id_transacao,
-                        status="negada",
-                        mensagem="Transação suspeita identificada"
-                    )
+                data_autorizacao = datetime.now()
+                status_autorizacao = "negada" if fraud_result.get('status') == 'suspeita' else "aprovada"
+          
+            
 
-              
-                await conn.execute(
-                    """
-                    INSERT INTO autenticacao.autorizacoes 
-                    (id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
-                    VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    id_transacao,
-                    id_cartao,
-                    valor,
-                    'autorizada',
-                    datetime.now()
-                )
+            id_autorizacao = await gerar_id_autorizacao_serial(conn)
 
-               
+            await conn.execute(
+                """
+                INSERT INTO autenticacao.autorizacoes 
+                (id_autorizacao, id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                id_autorizacao,
+                id_transacao,
+                id_cartao,
+                valor,
+                status_autorizacao,
+                data_autorizacao
+            )
+
+           
+            if status_autorizacao == "autorizada":
                 await conn.execute(
                     """
                     UPDATE autenticacao.limites 
@@ -166,64 +164,42 @@ async def transaction(
                     id_cartao
                 )
 
-                return AuthorizationResponse(
-                    id_transacao=id_transacao,
-                    status="autorizada",
-                    mensagem="Transação autorizada com sucesso"
-                )
 
-            except requests.RequestException as e:
-             
-                await conn.execute(
-                    """
-                    INSERT INTO autenticacao.autorizacoes 
-                    (id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
-                    VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    id_transacao,
-                    id_cartao,
-                    valor,
-                    'negada',
-                    datetime.now()
-                )
+         
+            try:
+                if status_autorizacao == "autorizada":
+                    autorizacao_response = requests.post(
+                        "http://liquidacao:8005/api/liquidacao",
+                        params={
+                            "id_transacao": id_transacao,
+                            "valor": valor,
+                        },
+                        timeout=5
+                    )
+                else:
+                    autorizacao_response = requests.post(
+                        "http://negacao:8006/api/negacao",
+                        params={
+                            "id_transacao": id_transacao,
+                            "motivo": "Transação não autorizada"
+                        },
+                        timeout=5
+                    )
                 
-                raise HTTPException(
-                    status_code=500,
-                    detail="Erro ao processar análise antifraude"
-                )
-
-            if status_autorizacao == "autorizada":
+                autorizacao_response.raise_for_status()
+                autorizacao_result = autorizacao_response.json()
+            except requests.RequestException:
                 
-                liquidacao_response = session.post(
-                    "http://liquidacao:8005/api/liquidacao",
-                    params={
-                        "id_transacao": id_transacao,
-                        "valor": valor,
-                        "id_autorizacao": id_autorizacao
-                    },
-                    timeout=5
-                )
-                liquidacao_response.raise_for_status()
-            else:
-               
-                negacao_response = session.post(
-                    "http://negacao:8006/api/negacao",
-                    params={
-                        "id_transacao": id_transacao,
-                        "id_autorizacao": id_autorizacao,
-                        "motivo": "Transação não autorizada"
-                    },
-                    timeout=5
-                )
-                negacao_response.raise_for_status()
+                pass
 
-            return {
-                "id_autorizacao": id_autorizacao,
-                "status": status_autorizacao,
-                "data_autorizacao": data_autorizacao.isoformat()
-            }
+            return AuthorizationResponse(
+                id_transacao=id_transacao,
+                status= autorizacao_result.get('status'),
+                mensagem="Transação processada com sucesso"
+            )
 
         except Exception as e:
+            logger.exception(f"Erro na autorização: {str(e)}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Erro na autorização: {str(e)}"

@@ -55,7 +55,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
 @app.post("/api/negacao")
-async def process_negacao(negacao: NegacaoRequest):
+async def negacao(
+    id_transacao: str,
+    motivo: str
+):
     async with pool.acquire() as conn:
         try:
             
@@ -68,18 +71,17 @@ async def process_negacao(negacao: NegacaoRequest):
                     """
                     INSERT INTO autenticacao.negacoes 
                     (id_negacao, id_transacao, motivo, data_negacao)
-                    VALUES ($1, $2, $3, $4, $5)
+                    VALUES ($1, $2, $3, $4)
                     """,
                     id_negacao,
-                    negacao.id_autorizacao,
-                    negacao.id_transacao,
-                    negacao.motivo,
+                    id_transacao,
+                    motivo,
                     data_negacao
                 )
 
                 return {
                     "id_negacao": id_negacao,
-                    "id_transacao": negacao.id_transacao,
+                    "id_transacao": id_transacao,
                     "status": "negada",
                     "data_negacao": data_negacao.isoformat()
                 }

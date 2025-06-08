@@ -52,15 +52,34 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         return id_usuario
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    
+async def gerar_id_lote_serial(conn) -> str:
+    resultado = await conn.fetchval("""
+        SELECT MAX(CAST(SUBSTRING(id_lote FROM '[0-9]+$') AS INTEGER))
+        FROM liquidacoes.lotes 
+    """)
+    proximo_id = (resultado or 0) + 1
+    return f"lote_{proximo_id}"
+
+async def gerar_id_liquidacao_serial(conn) -> str:
+    resultado = await conn.fetchval("""
+        SELECT MAX(CAST(SUBSTRING(liquidacao FROM '[0-9]+$') AS INTEGER))
+        FROM liquidacoes.liquidacoes 
+    """)
+    proximo_id = (resultado or 0) + 1
+    return f"liquidacao_{proximo_id}"
 
 @app.post("/api/liquidacao")
-async def process_liquidacao(liquidacao: LiquidacaoRequest):
+async def liquidacao(
+    id_transacao: str,
+    valor: float
+):
     async with pool.acquire() as conn:
         try:
           
             async with conn.transaction():
                 data_liquidacao = datetime.now()
-                id_liquidacao = str(uuid.uuid4())
+                id_liquidacao = await gerar_id_liquidacao_serial(conn)
                 
                
                 current_date = data_liquidacao.date()
@@ -75,7 +94,7 @@ async def process_liquidacao(liquidacao: LiquidacaoRequest):
                 
                 if not lote_result:
                   
-                    id_lote = str(uuid.uuid4())
+                    id_lote = await gerar_id_lote_serial(conn)
                     await conn.execute(
                         """
                         INSERT INTO liquidacoes.lotes 
@@ -95,13 +114,13 @@ async def process_liquidacao(liquidacao: LiquidacaoRequest):
                     """
                     INSERT INTO liquidacoes.liquidacoes 
                     (id_liquidacao, id_lote, valor_total, data_liquidacao, status_liquidacao)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, $4, $5)
                     """,
                     id_liquidacao,
                     id_lote,
-                    liquidacao.valor,
+                    valor,
                     data_liquidacao,
-                    'processando'
+                    'aprovada'
                 )
 
              
@@ -111,14 +130,14 @@ async def process_liquidacao(liquidacao: LiquidacaoRequest):
                     SET valor_total = valor_total + $1
                     WHERE id_lote = $2
                     """,
-                    liquidacao.valor,
+                    valor,
                     id_lote
                 )
 
                 return {
                     "id_liquidacao": id_liquidacao,
                     "id_lote": id_lote,
-                    "status": "processando",
+                    "status": "aprovada",
                     "data_liquidacao": data_liquidacao.isoformat()
                 }
 

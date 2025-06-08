@@ -9,6 +9,7 @@ import logging
 import json
 import os
 from typing import Dict, Any
+import random
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,19 +50,27 @@ class TransacaoStatus(BaseModel):
     status: str
     detalhes: Dict[str, Any]
     data_atualizacao: datetime
+    
+async def gerar_id_transacao_serial(conn) -> str:
+    resultado = await conn.fetchval("""
+        SELECT MAX(CAST(SUBSTRING(id_transacao FROM '[0-9]+') AS INTEGER))
+        FROM antifraude.transacoes
+    """)
+    proximo_id = (resultado or 0) + 1
+    sufixo_aleatorio = random.randint(0, 99999)  
+    return f"trans_{proximo_id}_{sufixo_aleatorio:05d}" 
 
 @app.post("/eventos/transacao-iniciada")
 async def handle_transacao_iniciada(
-    id_transacao: str,
     id_cartao: str,
     id_usuario: str,
     valor: float,
-    data_transacao: str,
-    local_transacao: str,
-    status_transacao: str
+    local_transacao: str
 ):
     async with pool.acquire() as conn:
         try:
+            id_transacao = await gerar_id_transacao_serial(conn)
+            data_transacao = datetime.now()
             
             response = session.get(
                 f"http://bacen:8008/bacen/clientes/{id_usuario}",
@@ -90,11 +99,14 @@ async def handle_transacao_iniciada(
                     "id_transacao": id_transacao,
                     "id_cartao": id_cartao,
                     "id_usuario": id_usuario,
-                    "valor": valor
+                    "valor": valor,
+                    "data_transacao": data_transacao,
+                    "local_transacao": local_transacao
                 },
                 timeout=5
             )
             auth_response.raise_for_status()
+            auth_result = auth_response.json()
             
           
             await conn.execute(
@@ -135,7 +147,7 @@ async def handle_transacao_iniciada(
             )
 
             return {
-                "status": "processando",
+                "status": auth_result.get('status'),
                 "id_transacao": id_transacao
             }
 
