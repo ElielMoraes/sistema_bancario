@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import asyncpg
 import jwt
@@ -40,6 +40,12 @@ class Transacao(BaseModel):
     status_transacao: str
     data_transacao: datetime
 
+class FraudAnalysisRequest(BaseModel):
+    id_transacao: str
+    id_cartao: str
+    valor: float
+    data_transacao: str
+
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -50,106 +56,120 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-@app.post("/api/eventos/transacao")
-async def registrar_transacao(transacao: Transacao, current_user: str = Depends(get_current_user)):
+@app.post("/api/analise")
+async def analyze_transaction(transaction: FraudAnalysisRequest):
     async with pool.acquire() as conn:
         try:
+            suspicious_factors = []
             
-            result = await conn.fetchrow(
-                "SELECT 1 FROM autenticacao.cartoes WHERE id_cartao = $1",
-                transacao.id_cartao
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Cartão inválido")
-
-            
-            result = await conn.fetchrow(
-                "SELECT 1 FROM autenticacao.usuarios WHERE id_usuario = $1",
-                transacao.id_usuario
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Usuário inválido")
+          
+            if transaction.valor >= 10000:  
+                suspicious_factors.append("valor_alto")
 
           
-            await conn.execute(
+            recent_transactions = await conn.fetch(
                 """
-                INSERT INTO antifraude.transacoes (id_transacao, id_cartao, id_usuario, valor, data_transacao, local_transacao, status_transacao)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                SELECT COUNT(*) as count, SUM(valor) as total
+                FROM antifraude.transacoes 
+                WHERE id_cartao = $1 
+                AND data_transacao >= $2
                 """,
-                transacao.id_transacao,
-                transacao.id_cartao,
-                transacao.id_usuario,
-                transacao.valor,
-                transacao.data_transacao,
-                transacao.local_transacao,
-                transacao.status_transacao
+                transaction.id_cartao,
+                datetime.fromisoformat(transaction.data_transacao) - timedelta(hours=1)
             )
+            
+            if recent_transactions[0]['count'] >= 5: 
+                suspicious_factors.append("frequencia_alta")
+            
+            if recent_transactions[0]['total'] and \
+               recent_transactions[0]['total'] + transaction.valor >= 15000:  
+                suspicious_factors.append("volume_alto_periodo")
 
           
-            score_fraude = round(float(__import__('random').random() * 100), 2)
-            resultado_analise = "suspeita" if score_fraude > 70 else "segura"
-            id_analise = str(uuid.uuid4())
+            avg_transaction = await conn.fetchrow(
+                """
+                SELECT AVG(valor) as media
+                FROM antifraude.transacoes 
+                WHERE id_cartao = $1 
+                AND data_transacao >= $2
+                """,
+                transaction.id_cartao,
+                datetime.fromisoformat(transaction.data_transacao) - timedelta(days=30)
+            )
+            
+            if avg_transaction and avg_transaction['media']:
+                if transaction.valor >= (avg_transaction['media'] * 5):  
+                    suspicious_factors.append("padrao_valor_anomalo")
+
+           
+            last_transaction = await conn.fetchrow(
+                """
+                SELECT data_transacao
+                FROM antifraude.transacoes 
+                WHERE id_cartao = $1 
+                ORDER BY data_transacao DESC 
+                LIMIT 1
+                """,
+                transaction.id_cartao
+            )
+            
+            if last_transaction:
+                time_diff = datetime.fromisoformat(transaction.data_transacao) - \
+                           last_transaction['data_transacao']
+                if time_diff.total_seconds() < 30: 
+                    suspicious_factors.append("transacoes_rapidas")
+
+           
             await conn.execute(
                 """
-                INSERT INTO antifraude.analise_fraude (id_analise, id_transacao, score_fraude, resultado_analise, data_analise)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO antifraude.transacoes 
+                (id_transacao, id_cartao, valor, data_transacao)
+                VALUES ($1, $2, $3, $4)
                 """,
-                id_analise, transacao.id_transacao, score_fraude, resultado_analise, datetime.utcnow()
+                transaction.id_transacao,
+                transaction.id_cartao,
+                transaction.valor,
+                datetime.fromisoformat(transaction.data_transacao)
             )
 
            
-            log = {
-                "transacao_id": transacao.id_transacao,
-                "evento": "transacao",
-                "detalhes": f"Transação registrada com valor {transacao.valor}",
-                "status": "sucesso"
-            }
-            result = await conn.fetchrow(
+            is_suspicious = len(suspicious_factors) >= 1  
+
+          
+            await conn.execute(
                 """
-                INSERT INTO data_lake.logs_completos (data_log, log)
-                VALUES ($1, $2)
-                RETURNING id_log
+                INSERT INTO antifraude.analises 
+                (id_transacao, status, fatores_suspeitos, data_analise)
+                VALUES ($1, $2, $3, $4)
                 """,
-                datetime.utcnow().date(), json.dumps(log)
+                transaction.id_transacao,
+                'suspeita' if is_suspicious else 'normal',
+                json.dumps(suspicious_factors) if suspicious_factors else None,
+                datetime.now()
             )
-            evento_id = f"log_{result['id_log']}"
 
-            return {"status": "success", "evento_id": evento_id, "mensagem": "Evento de transação registrado com sucesso."}
+            return {
+                "id_transacao": transaction.id_transacao,
+                "status": "suspeita" if is_suspicious else "normal",
+                "fatores": suspicious_factors,
+                "data_analise": datetime.now().isoformat()
+            }
+
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/eventos/fraudes")
-async def consultar_fraudes(
-    score_minimo: Optional[float] = None,
-    resultado_analise: Optional[str] = None,
-    current_user: str = Depends(get_current_user)
-):
-    async with pool.acquire() as conn:
-        try:
-            query = """
-                SELECT af.id_analise, af.id_transacao, af.score_fraude, af.resultado_analise, af.data_analise
-                FROM antifraude.analise_fraude af
-                WHERE 1=1
-            """
-            params = []
-
-            if score_minimo is not None:
-                query += " AND af.score_fraude >= $1"
-                params.append(score_minimo)
-            if resultado_analise:
-                query += f" AND af.resultado_analise = ${len(params) + 1}"
-                params.append(resultado_analise)
-
-            fraudes = await conn.fetch(query, *params)
-            return [
-                {
-                    "id_analise": f["id_analise"],
-                    "id_transacao": f["id_transacao"],
-                    "score_fraude": f["score_fraude"],
-                    "resultado_analise": f["resultado_analise"],
-                    "data_analise": f["data_analise"]
-                }
-                for f in fraudes
-            ]
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+          
+            await conn.execute(
+                """
+                INSERT INTO antifraude.analises 
+                (id_transacao, status, erro, data_analise)
+                VALUES ($1, $2, $3, $4)
+                """,
+                transaction.id_transacao,
+                'erro',
+                str(e),
+                datetime.now()
+            )
+            
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro na análise antifraude: {str(e)}"
+            )

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncpg
 import jwt
 import uuid
@@ -39,6 +39,17 @@ class Tokenizacao(BaseModel):
     data_criacao: datetime
     data_expiracao: datetime
     status_token: str
+    
+class TokenizationRequest(BaseModel):
+    id_transacao: str
+    id_cartao: str
+    valor: float
+
+class TokenResponse(BaseModel):
+    id_transacao: str
+    token: str
+    data_expiracao: str
+    status: str
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
@@ -50,58 +61,87 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-@app.post("/api/eventos/tokenizar")
-async def registrar_tokenizacao(tokenizacao: Tokenizacao, current_user: str = Depends(get_current_user)):
+@app.post("/api/tokenizacao", response_model=TokenResponse)
+async def tokenize_transaction(transaction: TokenizationRequest):
     async with pool.acquire() as conn:
         try:
+       
+            raw_token = f"{transaction.id_transacao}{transaction.id_cartao}{secrets.token_hex(16)}"
+            token = hashlib.sha256(raw_token.encode()).hexdigest()[:32] 
             
-            result = await conn.fetchrow(
-                "SELECT 1 FROM autenticacao.cartoes WHERE id_cartao = $1",
-                tokenizacao.id_cartao
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Cartão inválido")
-
+     
+            data_expiracao = datetime.now() + timedelta(minutes=15)
+            
            
-            await conn.execute(
+            existing_token = await conn.fetchrow(
                 """
-                INSERT INTO tokenizacao.tokens (id_token, id_cartao, valor_token, data_criacao, data_expiracao, status_token)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                SELECT token, data_expiracao 
+                FROM tokenizacao.tokens 
+                WHERE id_transacao = $1 AND data_expiracao > $2
                 """,
-                tokenizacao.id_token,
-                tokenizacao.id_cartao,
-                tokenizacao.valor_token,
-                tokenizacao.data_criacao,
-                tokenizacao.data_expiracao,
-                tokenizacao.status_token
+                transaction.id_transacao,
+                datetime.now()
             )
-
             
+            if existing_token:
+          
+                return TokenResponse(
+                    id_transacao=transaction.id_transacao,
+                    token=existing_token['token'],
+                    data_expiracao=existing_token['data_expiracao'].isoformat(),
+                    status="existente"
+                )
+        
             await conn.execute(
                 """
-                INSERT INTO tokenizacao.manutencao_tokens (id_manutencao, id_token, acao, data_manutencao)
+                INSERT INTO tokenizacao.tokens 
+                (id_transacao, id_cartao, token, valor, data_criacao, data_expiracao, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                transaction.id_transacao,
+                transaction.id_cartao,
+                token,
+                transaction.valor,
+                datetime.now(),
+                data_expiracao,
+                'ativo'
+            )
+            
+        
+            await conn.execute(
+                """
+                INSERT INTO tokenizacao.eventos_token 
+                (id_transacao, token, tipo_evento, data_evento)
                 VALUES ($1, $2, $3, $4)
                 """,
-                str(uuid.uuid4()), tokenizacao.id_token, "criacao", datetime.utcnow()
+                transaction.id_transacao,
+                token,
+                'criacao',
+                datetime.now()
             )
 
-            
-            log = {
-                "token_id": tokenizacao.id_token,
-                "evento": "tokenizacao",
-                "detalhes": f"Token criado para cartão {tokenizacao.id_cartao}",
-                "status": "sucesso"
-            }
-            result = await conn.fetchrow(
-                """
-                INSERT INTO data_lake.logs_completos (data_log, log)
-                VALUES ($1, $2)
-                RETURNING id_log
-                """,
-                datetime.utcnow().date(), json.dumps(log)
+            return TokenResponse(
+                id_transacao=transaction.id_transacao,
+                token=token,
+                data_expiracao=data_expiracao.isoformat(),
+                status="criado"
             )
-            evento_id = f"log_{result['id_log']}"
 
-            return {"status": "success", "evento_id": evento_id, "mensagem": "Evento de tokenização registrado com sucesso."}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+         
+            await conn.execute(
+                """
+                INSERT INTO tokenizacao.eventos_token 
+                (id_transacao, tipo_evento, erro, data_evento)
+                VALUES ($1, $2, $3, $4)
+                """,
+                transaction.id_transacao,
+                'erro',
+                str(e),
+                datetime.now()
+            )
+            
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro na tokenização: {str(e)}"
+            )

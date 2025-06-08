@@ -54,115 +54,102 @@ class TransacaoStatus(BaseModel):
 async def handle_transacao_iniciada(event: TransacaoIniciada):
     async with pool.acquire() as conn:
         try:
+            
             response = session.get(
                 f"http://bacen:8008/bacen/clientes/{event.id_usuario}",
                 timeout=5
             )
             response.raise_for_status()
+            
+           
             await conn.execute(
-                    """
-                    INSERT INTO data_lake.logs_completos (data_log, log)
-                    VALUES ($1, $2)
-                    """,
-                    datetime.now(),
-                    json.dumps({
-                        "event": "cliente_consultado",
-                        "id_cliente": event.id_usuario,
-                        "status": "sucesso"
-                    })
-                )
+                """
+                INSERT INTO data_lake.logs_completos (data_log, log)
+                VALUES ($1, $2)
+                """,
+                datetime.now(),
+                json.dumps({
+                    "event": "cliente_consultado",
+                    "id_cliente": event.id_usuario,
+                    "status": "sucesso"
+                })
+            )
+            
+           
+            auth_response = session.post(
+                "http://autorizacao:8003/api/autorizacao",
+                json={
+                    "id_transacao": event.id_transacao,
+                    "id_cartao": event.id_cartao,
+                    "id_usuario": event.id_usuario,
+                    "valor": event.valor
+                },
+                timeout=5
+            )
+            auth_response.raise_for_status()
+            
+          
+            await conn.execute(
+                """
+                INSERT INTO data_lake.logs_completos (data_log, log)
+                VALUES ($1, $2)
+                """,
+                datetime.now(),
+                json.dumps({
+                    "event": "autorizacao_solicitada",
+                    "id_transacao": event.id_transacao
+                })
+            )
+
+          
+            token_response = session.post(
+                "http://tokenizacao:8002/api/tokenizacao",
+                json={
+                    "id_transacao": event.id_transacao,
+                    "id_cartao": event.id_cartao,
+                    "valor": event.valor
+                },
+                timeout=5
+            )
+            token_response.raise_for_status()
+            
+        
+            await conn.execute(
+                """
+                INSERT INTO data_lake.logs_completos (data_log, log)
+                VALUES ($1, $2)
+                """,
+                datetime.now(),
+                json.dumps({
+                    "event": "tokenizacao_solicitada",
+                    "id_transacao": event.id_transacao
+                })
+            )
+
+            return {
+                "status": "processando",
+                "id_transacao": event.id_transacao
+            }
+
         except requests.RequestException as e:
-            await conn.execute(
-                    """
-                    INSERT INTO data_lake.logs_completos (data_log, log)
-                    VALUES ($1, $2)
-                    """,
-                    datetime.now(),
-                    json.dumps({
-                        "event": "erro_cliente_consulta",
-                        "id_cliente": event.id_usuario,
-                        "error": str(e)
-                    })
-                )
-            raise HTTPException(status_code=400, detail="Usuário não registrado no BACEN")
-
-    async with pool.acquire() as conn:
-        try:
-            
-            user_exists = await conn.fetchval(
-                "SELECT id_usuario FROM autenticacao.usuarios WHERE id_usuario = $1",
-                event.id_usuario
-            )
-            if not user_exists:
-                raise HTTPException(status_code=404, detail="Usuário não encontrado")
-
-            
-            card_exists = await conn.fetchval(
-                "SELECT id_cartao FROM autenticacao.cartoes WHERE id_cartao = $1 AND status_cartao = 'ativo'",
-                event.id_cartao
-            )
-            if not card_exists:
-                raise HTTPException(status_code=400, detail="Cartão inválido ou inativo")
-
-            
-            await conn.execute(
-                """
-                INSERT INTO antifraude.transacoes (
-                    id_transacao, id_cartao, id_usuario, valor, data_transacao, local_transacao, status_transacao
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                event.id_transacao, event.id_cartao, event.id_usuario, event.valor,
-                event.data_transacao, event.local_transacao, event.status_transacao
-            )
-
-            
+         
             await conn.execute(
                 """
                 INSERT INTO data_lake.logs_completos (data_log, log)
                 VALUES ($1, $2)
                 """,
                 datetime.now(),
-                json.dumps({"event": "transacao_iniciada", **event.dict()})
+                json.dumps({
+                    "event": "erro_processamento",
+                    "id_transacao": event.id_transacao,
+                    "error": str(e)
+                })
             )
-
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro no processamento da transação: {str(e)}"
+            )
             
-            try:
-                response = session.post(
-                    "http://tokenizacao:8002/eventos/tokenizar",
-                    json=event.dict(),
-                    timeout=5
-                )
-                response.raise_for_status()
-
-                await conn.execute(
-                    """
-                    INSERT INTO data_lake.logs_completos (data_log, log)
-                    VALUES ($1, $2)
-                    """,
-                    datetime.now(),
-                    json.dumps({"event": "transacao_tokenizada", "id_transacao": event.id_transacao})
-                )
-                return {"status": "tokenizada", "id_transacao": event.id_transacao}
-            except requests.RequestException as e:
-                await conn.execute(
-                    """
-                    INSERT INTO data_lake.logs_completos (data_log, log)
-                    VALUES ($1, $2)
-                    """,
-                    datetime.now(),
-                    json.dumps({"event": "erro_tokenizacao", "id_transacao": event.id_transacao, "error": str(e)})
-                )
-                raise HTTPException(status_code=500, detail=f"Erro na tokenização: {str(e)}")
-        except Exception as e:
-            await conn.execute(
-                """
-                INSERT INTO data_lake.logs_completos (data_log, log)
-                VALUES ($1, $2)
-                """,
-                datetime.now(),
-                json.dumps({"event": "erro_transacao", "id_transacao": event.id_transacao, "error": str(e)})
-            )
-            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/eventos/transacao-autorizada")
 async def handle_transacao_autorizada(event: Dict[str, Any]):

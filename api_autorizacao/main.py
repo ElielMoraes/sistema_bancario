@@ -7,6 +7,7 @@ import jwt
 import uuid
 import json
 import os
+import requests
 
 app = FastAPI(title="Autenticação Service")
 
@@ -37,6 +38,17 @@ class Autorizacao(BaseModel):
     valor: float
     status_autorizacao: str
     data_autorizacao: datetime
+    
+class AuthorizationRequest(BaseModel):
+    id_transacao: str
+    id_cartao: str
+    id_usuario: str
+    valor: float
+
+class AuthorizationResponse(BaseModel):
+    id_transacao: str
+    status: str
+    mensagem: str
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
@@ -54,76 +66,130 @@ async def login(id_usuario: str):
     token = jwt.encode({"sub": id_usuario, "exp": datetime.utcnow() + token_expires}, SECRET_KEY, algorithm=ALGORITHM)
     return {"access_token": token, "token_type": "bearer"}
 
-@app.post("/api/eventos/autorizacao")
-async def registrar_autorizacao(autorizacao: Autorizacao, current_user: str = Depends(get_current_user)):
+@app.post("/api/autorizacao", response_model=AuthorizationResponse)
+async def authorize_transaction(transaction: AuthorizationRequest):
     async with pool.acquire() as conn:
         try:
-           
-            result = await conn.fetchrow(
-                "SELECT 1 FROM antifraude.transacoes WHERE id_transacao = $1",
-                autorizacao.id_transacao
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Transação inválida")
-
           
-            result = await conn.fetchrow(
-                "SELECT 1 FROM autenticacao.cartoes WHERE id_cartao = $1",
-                autorizacao.id_cartao
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Cartão inválido")
-
-           
-            result = await conn.fetchrow(
-                "SELECT limite_disponivel FROM autenticacao.limites WHERE id_cartao = $1",
-                autorizacao.id_cartao
-            )
-            if not result or result["limite_disponivel"] < autorizacao.valor:
-                raise HTTPException(status_code=400, detail="Limite insuficiente")
-
-          
-            id_autorizacao = f"autorizacao_{uuid.uuid4()}"
-            await conn.execute(
+            card_result = await conn.fetchrow(
                 """
-                INSERT INTO autenticacao.autorizacoes (id_autorizacao, id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                SELECT status 
+                FROM autenticacao.cartoes 
+                WHERE id_cartao = $1 AND id_usuario = $2
                 """,
-                id_autorizacao,
-                autorizacao.id_transacao,
-                autorizacao.id_cartao,
-                autorizacao.valor,
-                autorizacao.status_autorizacao,
-                autorizacao.data_autorizacao
+                transaction.id_cartao,
+                transaction.id_usuario
             )
-
             
-            if autorizacao.status_autorizacao == "negada":
+            if not card_result:
+                raise HTTPException(status_code=404, detail="Cartão não encontrado")
+            
+            if card_result['status'] != 'ativo':
+                raise HTTPException(status_code=400, detail="Cartão inativo")
+
+          
+            limit_result = await conn.fetchrow(
+                """
+                SELECT limite_disponivel 
+                FROM autenticacao.limites 
+                WHERE id_cartao = $1
+                """,
+                transaction.id_cartao
+            )
+            
+            if not limit_result or limit_result['limite_disponivel'] < transaction.valor:
+                raise HTTPException(status_code=400, detail="Limite indisponível")
+
+         
+            try:
+                fraud_response = requests.post(
+                    "http://antifraude:8004/api/analise",
+                    json={
+                        "id_transacao": transaction.id_transacao,
+                        "id_cartao": transaction.id_cartao,
+                        "valor": transaction.valor,
+                        "data_transacao": datetime.now().isoformat()
+                    },
+                    timeout=5
+                )
+                fraud_response.raise_for_status()
+                fraud_result = fraud_response.json()
+
+                if fraud_result['status'] == 'suspeita':
+                  
+                    await conn.execute(
+                        """
+                        INSERT INTO autenticacao.autorizacoes 
+                        (id_transacao, id_cartao, valor, status, data_autorizacao)
+                        VALUES ($1, $2, $3, $4, $5)
+                        """,
+                        transaction.id_transacao,
+                        transaction.id_cartao,
+                        transaction.valor,
+                        'negada',
+                        datetime.now()
+                    )
+                    
+                    return AuthorizationResponse(
+                        id_transacao=transaction.id_transacao,
+                        status="negada",
+                        mensagem="Transação suspeita identificada"
+                    )
+
+              
                 await conn.execute(
                     """
-                    INSERT INTO autenticacao.negacoes (id_negacao, id_transacao, motivo, data_negacao)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO autenticacao.autorizacoes 
+                    (id_transacao, id_cartao, valor, status, data_autorizacao)
+                    VALUES ($1, $2, $3, $4, $5)
                     """,
-                    f"negacao_{uuid.uuid4()}", autorizacao.id_transacao, "Limite excedido ou suspeita de fraude", datetime.utcnow()
+                    transaction.id_transacao,
+                    transaction.id_cartao,
+                    transaction.valor,
+                    'autorizada',
+                    datetime.now()
                 )
 
-          
-            log = {
-                "transacao_id": autorizacao.id_transacao,
-                "evento": "autorizacao",
-                "detalhes": f"Autorização {autorizacao.status_autorizacao} para valor {autorizacao.valor}",
-                "status": "sucesso"
-            }
-            result = await conn.fetchrow(
-                """
-                INSERT INTO data_lake.logs_completos (data_log, log)
-                VALUES ($1, $2)
-                RETURNING id_log
-                """,
-                datetime.utcnow().date(), json.dumps(log)
-            )
-            evento_id = f"log_{result['id_log']}"
+               
+                await conn.execute(
+                    """
+                    UPDATE autenticacao.limites 
+                    SET limite_disponivel = limite_disponivel - $1
+                    WHERE id_cartao = $2
+                    """,
+                    transaction.valor,
+                    transaction.id_cartao
+                )
 
-            return {"status": "success", "evento_id": evento_id, "mensagem": "Evento de autorização registrado com sucesso."}
+                return AuthorizationResponse(
+                    id_transacao=transaction.id_transacao,
+                    status="autorizada",
+                    mensagem="Transação autorizada com sucesso"
+                )
+
+            except requests.RequestException as e:
+             
+                await conn.execute(
+                    """
+                    INSERT INTO autenticacao.autorizacoes 
+                    (id_transacao, id_cartao, valor, status, data_autorizacao)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    transaction.id_transacao,
+                    transaction.id_cartao,
+                    transaction.valor,
+                    'negada',
+                    datetime.now()
+                )
+                
+                raise HTTPException(
+                    status_code=500,
+                    detail="Erro ao processar análise antifraude"
+                )
+
+
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro no processamento da autorização: {str(e)}"
+            )
