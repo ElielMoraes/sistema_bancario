@@ -85,7 +85,7 @@ async def handle_transacao_iniciada(
             
            
             auth_response = session.post(
-                "http://autorizacao:8003/api/autorizacao",
+                "http://autorizacao:8004/api/autorizacao",
                 params={
                     "id_transacao": id_transacao,
                     "id_cartao": id_cartao,

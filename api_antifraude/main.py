@@ -143,20 +143,20 @@ async def transaction(
           
             await conn.execute(
                 """
-                INSERT INTO antifraude.analises 
-                (id_transacao, status, fatores_suspeitos, data_analise)
+                INSERT INTO antifraude.analise_fraude 
+                (id_transacao, resultado_analise, score_fraude, data_analise)
                 VALUES ($1, $2, $3, $4)
                 """,
                 id_transacao,
                 'suspeita' if is_suspicious else 'normal',
-                json.dumps(suspicious_factors) if suspicious_factors else None,
+                len(suspicious_factors),
                 datetime.now()
             )
 
             return {
                 "id_transacao": id_transacao,
                 "status": "suspeita" if is_suspicious else "normal",
-                "fatores": suspicious_factors,
+                "fatores": len(suspicious_factors),
                 "data_analise": datetime.now().isoformat()
             }
 
@@ -164,13 +164,13 @@ async def transaction(
           
             await conn.execute(
                 """
-                INSERT INTO antifraude.analises 
-                (id_transacao, status, erro, data_analise)
+                INSERT INTO antifraude.analise_fraude 
+                (id_transacao, resultado_analise, score_fraude, data_analise)
                 VALUES ($1, $2, $3, $4)
                 """,
                 id_transacao,
                 'erro',
-                str(e),
+                0,
                 datetime.now()
             )
             

@@ -78,7 +78,7 @@ async def transaction(
           
             card_result = await conn.fetchrow(
                 """
-                SELECT status 
+                SELECT status_cartao
                 FROM autenticacao.cartoes 
                 WHERE id_cartao = $1 AND id_usuario = $2
                 """,
@@ -108,7 +108,7 @@ async def transaction(
          
             try:
                 fraud_response = requests.post(
-                    "http://antifraude:8004/api/analise",
+                    "http://antifraude:8003/api/analise",
                     params={
                         "id_transacao": id_transacao,
                         "id_cartao": id_cartao,
@@ -125,7 +125,7 @@ async def transaction(
                     await conn.execute(
                         """
                         INSERT INTO autenticacao.autorizacoes 
-                        (id_transacao, id_cartao, valor, status, data_autorizacao)
+                        (id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
                         VALUES ($1, $2, $3, $4, $5)
                         """,
                         id_transacao,
@@ -145,7 +145,7 @@ async def transaction(
                 await conn.execute(
                     """
                     INSERT INTO autenticacao.autorizacoes 
-                    (id_transacao, id_cartao, valor, status, data_autorizacao)
+                    (id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
                     id_transacao,
@@ -177,7 +177,7 @@ async def transaction(
                 await conn.execute(
                     """
                     INSERT INTO autenticacao.autorizacoes 
-                    (id_transacao, id_cartao, valor, status, data_autorizacao)
+                    (id_transacao, id_cartao, valor, status_autorizacao, data_autorizacao)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
                     id_transacao,
@@ -195,7 +195,7 @@ async def transaction(
             if status_autorizacao == "autorizada":
                 
                 liquidacao_response = session.post(
-                    "http://liquidacao:8006/api/liquidacao",
+                    "http://liquidacao:8005/api/liquidacao",
                     params={
                         "id_transacao": id_transacao,
                         "valor": valor,
@@ -207,7 +207,7 @@ async def transaction(
             else:
                
                 negacao_response = session.post(
-                    "http://negacao:8007/api/negacao",
+                    "http://negacao:8006/api/negacao",
                     params={
                         "id_transacao": id_transacao,
                         "id_autorizacao": id_autorizacao,

@@ -68,7 +68,7 @@ async def process_liquidacao(liquidacao: LiquidacaoRequest):
                     """
                     SELECT id_lote 
                     FROM liquidacoes.lotes 
-                    WHERE data_lote = $1 AND status_lote = 'aberto'
+                    WHERE data_criacao = $1
                     """,
                     current_date
                 )
@@ -79,7 +79,7 @@ async def process_liquidacao(liquidacao: LiquidacaoRequest):
                     await conn.execute(
                         """
                         INSERT INTO liquidacoes.lotes 
-                        (id_lote, data_lote, status_lote, valor_total)
+                        (id_lote, data_criacao, status_lote, valor_total_lote)
                         VALUES ($1, $2, $3, $4)
                         """,
                         id_lote,
@@ -94,12 +94,11 @@ async def process_liquidacao(liquidacao: LiquidacaoRequest):
                 await conn.execute(
                     """
                     INSERT INTO liquidacoes.liquidacoes 
-                    (id_liquidacao, id_lote, id_transacao, valor, data_liquidacao, status_liquidacao)
+                    (id_liquidacao, id_lote, valor_total, data_liquidacao, status_liquidacao)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     """,
                     id_liquidacao,
                     id_lote,
-                    liquidacao.id_transacao,
                     liquidacao.valor,
                     data_liquidacao,
                     'processando'

@@ -67,7 +67,7 @@ async def process_negacao(negacao: NegacaoRequest):
                 await conn.execute(
                     """
                     INSERT INTO autenticacao.negacoes 
-                    (id_negacao, id_autorizacao, id_transacao, motivo_negacao, data_negacao)
+                    (id_negacao, id_transacao, motivo, data_negacao)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
                     id_negacao,
