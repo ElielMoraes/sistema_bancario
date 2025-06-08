@@ -7,6 +7,8 @@ import jwt
 import uuid
 import json
 import os
+import secrets
+import hashlib
 
 app = FastAPI(title="Tokenização Service")
 
@@ -65,44 +67,26 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 async def tokenize_transaction(transaction: TokenizationRequest):
     async with pool.acquire() as conn:
         try:
-       
-            raw_token = f"{transaction.id_transacao}{transaction.id_cartao}{secrets.token_hex(16)}"
-            token = hashlib.sha256(raw_token.encode()).hexdigest()[:32] 
-            
      
-            data_expiracao = datetime.now() + timedelta(minutes=15)
+            id_token = str(uuid.uuid4())
+            raw_token = f"{transaction.id_transacao}{transaction.id_cartao}{secrets.token_hex(16)}"
+            valor_token = hashlib.sha256(raw_token.encode()).hexdigest()[:32]
             
-           
-            existing_token = await conn.fetchrow(
-                """
-                SELECT token, data_expiracao 
-                FROM tokenizacao.tokens 
-                WHERE id_transacao = $1 AND data_expiracao > $2
-                """,
-                transaction.id_transacao,
-                datetime.now()
-            )
-            
-            if existing_token:
-          
-                return TokenResponse(
-                    id_transacao=transaction.id_transacao,
-                    token=existing_token['token'],
-                    data_expiracao=existing_token['data_expiracao'].isoformat(),
-                    status="existente"
-                )
         
+            data_criacao = datetime.now()
+            data_expiracao = data_criacao + timedelta(minutes=15)
+            
+         
             await conn.execute(
                 """
                 INSERT INTO tokenizacao.tokens 
-                (id_transacao, id_cartao, token, valor, data_criacao, data_expiracao, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (id_token, id_cartao, valor_token, data_criacao, data_expiracao, status_token)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 """,
-                transaction.id_transacao,
+                id_token,
                 transaction.id_cartao,
-                token,
-                transaction.valor,
-                datetime.now(),
+                valor_token,
+                data_criacao,
                 data_expiracao,
                 'ativo'
             )
@@ -110,37 +94,24 @@ async def tokenize_transaction(transaction: TokenizationRequest):
         
             await conn.execute(
                 """
-                INSERT INTO tokenizacao.eventos_token 
-                (id_transacao, token, tipo_evento, data_evento)
+                INSERT INTO tokenizacao.manutencao_tokens 
+                (id_manutencao, id_token, acao, data_manutencao)
                 VALUES ($1, $2, $3, $4)
                 """,
-                transaction.id_transacao,
-                token,
+                str(uuid.uuid4()),
+                id_token,
                 'criacao',
-                datetime.now()
+                data_criacao
             )
 
             return TokenResponse(
                 id_transacao=transaction.id_transacao,
-                token=token,
+                token=valor_token,
                 data_expiracao=data_expiracao.isoformat(),
                 status="criado"
             )
 
         except Exception as e:
-         
-            await conn.execute(
-                """
-                INSERT INTO tokenizacao.eventos_token 
-                (id_transacao, tipo_evento, erro, data_evento)
-                VALUES ($1, $2, $3, $4)
-                """,
-                transaction.id_transacao,
-                'erro',
-                str(e),
-                datetime.now()
-            )
-            
             raise HTTPException(
                 status_code=500,
                 detail=f"Erro na tokenização: {str(e)}"

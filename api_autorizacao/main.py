@@ -187,9 +187,53 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                     detail="Erro ao processar análise antifraude"
                 )
 
+            if status_autorizacao == "autorizada":
+                
+                async with httpx.AsyncClient() as client:
+                    liquidacao_request = {
+                        "id_transacao": transaction.id_transacao,
+                        "valor": transaction.valor,
+                        "id_autorizacao": id_autorizacao
+                    }
+                    
+                    liquidacao_response = await client.post(
+                        "http://api_liquidacao:8006/api/liquidacao",
+                        json=liquidacao_request
+                    )
+                    
+                    if liquidacao_response.status_code != 200:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Erro ao processar liquidação"
+                        )
+
+            else:  
+                async with httpx.AsyncClient() as client:
+                    negacao_request = {
+                        "id_transacao": transaction.id_transacao,
+                        "id_autorizacao": id_autorizacao,
+                        "motivo": "Transação não autorizada"  
+                    }
+                    
+                    negacao_response = await client.post(
+                        "http://api_negacao:8007/api/negacao",
+                        json=negacao_request
+                    )
+                    
+                    if negacao_response.status_code != 200:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Erro ao processar negação"
+                        )
+
+            return {
+                "id_autorizacao": id_autorizacao,
+                "status": status_autorizacao,
+                "data_autorizacao": data_autorizacao.isoformat()
+            }
 
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Erro no processamento da autorização: {str(e)}"
+                detail=f"Erro na autorização: {str(e)}"
             )

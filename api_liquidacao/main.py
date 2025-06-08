@@ -37,6 +37,11 @@ class Liquidacao(BaseModel):
     valor_total: float
     status_liquidacao: str
     data_liquidacao: datetime
+    
+class LiquidacaoRequest(BaseModel):
+    id_transacao: str
+    valor: float
+    id_autorizacao: str
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
@@ -48,48 +53,78 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-@app.post("/api/eventos/liquidacao")
-async def registrar_liquidacao(liquidacao: Liquidacao, current_user: str = Depends(get_current_user)):
+@app.post("/api/liquidacao")
+async def process_liquidacao(liquidacao: LiquidacaoRequest):
     async with pool.acquire() as conn:
         try:
-            
-            result = await conn.fetchrow(
-                "SELECT 1 FROM liquidacoes.lotes WHERE id_lote = $1",
-                liquidacao.id_lote
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Lote inválido")
+          
+            async with conn.transaction():
+                data_liquidacao = datetime.now()
+                id_liquidacao = str(uuid.uuid4())
+                
+               
+                current_date = data_liquidacao.date()
+                lote_result = await conn.fetchrow(
+                    """
+                    SELECT id_lote 
+                    FROM liquidacoes.lotes 
+                    WHERE data_lote = $1 AND status_lote = 'aberto'
+                    """,
+                    current_date
+                )
+                
+                if not lote_result:
+                  
+                    id_lote = str(uuid.uuid4())
+                    await conn.execute(
+                        """
+                        INSERT INTO liquidacoes.lotes 
+                        (id_lote, data_lote, status_lote, valor_total)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        id_lote,
+                        current_date,
+                        'aberto',
+                        0  
+                    )
+                else:
+                    id_lote = lote_result['id_lote']
 
-            
-            await conn.execute(
-                """
-                INSERT INTO liquidacoes.liquidacoes (id_liquidacao, id_lote, valor_total, data_liquidacao, status_liquidacao)
-                VALUES ($1, $2, $3, $4, $5)
-                """,
-                liquidacao.id_liquidacao,
-                liquidacao.id_lote,
-                liquidacao.valor_total,
-                liquidacao.data_liquidacao,
-                liquidacao.status_liquidacao
-            )
+           
+                await conn.execute(
+                    """
+                    INSERT INTO liquidacoes.liquidacoes 
+                    (id_liquidacao, id_lote, id_transacao, valor, data_liquidacao, status_liquidacao)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    id_liquidacao,
+                    id_lote,
+                    liquidacao.id_transacao,
+                    liquidacao.valor,
+                    data_liquidacao,
+                    'processando'
+                )
 
-            
-            log = {
-                "liquidacao_id": liquidacao.id_liquidacao,
-                "evento": "liquidacao",
-                "detalhes": f"Liquidação registrada para lote {liquidacao.id_lote} com valor {liquidacao.valor_total}",
-                "status": "sucesso"
-            }
-            result = await conn.fetchrow(
-                """
-                INSERT INTO data_lake.logs_completos (data_log, log)
-                VALUES ($1, $2)
-                RETURNING id_log
-                """,
-                datetime.utcnow().date(), json.dumps(log)
-            )
-            evento_id = f"log_{result['id_log']}"
+             
+                await conn.execute(
+                    """
+                    UPDATE liquidacoes.lotes 
+                    SET valor_total = valor_total + $1
+                    WHERE id_lote = $2
+                    """,
+                    liquidacao.valor,
+                    id_lote
+                )
 
-            return {"status": "success", "evento_id": evento_id, "mensagem": "Evento de liquidação registrado com sucesso."}
+                return {
+                    "id_liquidacao": id_liquidacao,
+                    "id_lote": id_lote,
+                    "status": "processando",
+                    "data_liquidacao": data_liquidacao.isoformat()
+                }
+
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro no processamento da liquidação: {str(e)}"
+            )

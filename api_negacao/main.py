@@ -38,6 +38,11 @@ async def shutdown_event():
 class NegacaoRequest(BaseModel):
     id_transacao: str
     motivo: str
+    
+class NegacaoRequest(BaseModel):
+    id_transacao: str
+    id_autorizacao: str
+    motivo: str
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
@@ -49,46 +54,38 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-@app.post("/api/eventos/negacao")
-async def registrar_negacao(request: NegacaoRequest, current_user: str = Depends(get_current_user)):
+@app.post("/api/negacao")
+async def process_negacao(negacao: NegacaoRequest):
     async with pool.acquire() as conn:
         try:
             
-            result = await conn.fetchrow(
-                "SELECT 1 FROM autenticacao.autorizacoes WHERE id_transacao = $1",
-                request.id_transacao
-            )
-            if not result:
-                raise HTTPException(status_code=400, detail="Transação inválida")
+            async with conn.transaction():
+                data_negacao = datetime.now()
+                id_negacao = str(uuid.uuid4())
+                
+                
+                await conn.execute(
+                    """
+                    INSERT INTO autenticacao.negacoes 
+                    (id_negacao, id_autorizacao, id_transacao, motivo_negacao, data_negacao)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    id_negacao,
+                    negacao.id_autorizacao,
+                    negacao.id_transacao,
+                    negacao.motivo,
+                    data_negacao
+                )
 
-            
-            id_negacao = f"negacao_{uuid.uuid4()}"
-            await conn.execute(
-                """
-                INSERT INTO autenticacao.negacoes (id_negacao, id_transacao, motivo, data_negacao)
-                VALUES ($1, $2, $3, $4)
-                """,
-                id_negacao, request.id_transacao, request.motivo, datetime.utcnow()
-            )
+                return {
+                    "id_negacao": id_negacao,
+                    "id_transacao": negacao.id_transacao,
+                    "status": "negada",
+                    "data_negacao": data_negacao.isoformat()
+                }
 
-            
-            log = {
-                "transacao_id": request.id_transacao,
-                "evento": "negacao",
-                "detalhes": f"Negação registrada com motivo: {request.motivo}",
-                "status": "sucesso"
-            }
-            result = await conn.fetchrow(
-                """
-                INSERT INTO data_lake.logs_completos (data_log, log)
-                VALUES ($1, $2)
-                RETURNING id_log
-                """,
-                datetime.utcnow().date(), json.dumps(log)
-            )
-            evento_id = f"log_{result['id_log']}"
-
-            return {"status": "success", "evento_id": evento_id, "mensagem": "Evento de negação registrado com sucesso.", "id_negacao": id_negacao}
         except Exception as e:
-            logger.error(f"Erro ao registrar negação: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro no processamento da negação: {str(e)}"
+            )
