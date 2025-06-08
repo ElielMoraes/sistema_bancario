@@ -64,12 +64,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
 @app.post("/api/tokenizacao", response_model=TokenResponse)
-async def tokenize_transaction(transaction: TokenizationRequest):
+async def transaction(
+    id_transacao: str,
+    id_cartao: str,
+    valor: float
+):
     async with pool.acquire() as conn:
         try:
      
             id_token = str(uuid.uuid4())
-            raw_token = f"{transaction.id_transacao}{transaction.id_cartao}{secrets.token_hex(16)}"
+            raw_token = f"{id_transacao}{id_cartao}{secrets.token_hex(16)}"
             valor_token = hashlib.sha256(raw_token.encode()).hexdigest()[:32]
             
         
@@ -84,7 +88,7 @@ async def tokenize_transaction(transaction: TokenizationRequest):
                 VALUES ($1, $2, $3, $4, $5, $6)
                 """,
                 id_token,
-                transaction.id_cartao,
+                id_cartao,
                 valor_token,
                 data_criacao,
                 data_expiracao,
@@ -105,7 +109,7 @@ async def tokenize_transaction(transaction: TokenizationRequest):
             )
 
             return TokenResponse(
-                id_transacao=transaction.id_transacao,
+                id_transacao=id_transacao,
                 token=valor_token,
                 data_expiracao=data_expiracao.isoformat(),
                 status="criado"

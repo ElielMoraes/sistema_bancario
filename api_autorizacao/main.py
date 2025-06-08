@@ -67,7 +67,12 @@ async def login(id_usuario: str):
     return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/api/autorizacao", response_model=AuthorizationResponse)
-async def authorize_transaction(transaction: AuthorizationRequest):
+async def transaction(
+    id_transacao: str,
+    id_cartao: str,
+    id_usuario: str,
+    valor: float
+):
     async with pool.acquire() as conn:
         try:
           
@@ -77,8 +82,8 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                 FROM autenticacao.cartoes 
                 WHERE id_cartao = $1 AND id_usuario = $2
                 """,
-                transaction.id_cartao,
-                transaction.id_usuario
+                id_cartao,
+                id_usuario
             )
             
             if not card_result:
@@ -94,20 +99,20 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                 FROM autenticacao.limites 
                 WHERE id_cartao = $1
                 """,
-                transaction.id_cartao
+                id_cartao
             )
             
-            if not limit_result or limit_result['limite_disponivel'] < transaction.valor:
+            if not limit_result or limit_result['limite_disponivel'] < valor:
                 raise HTTPException(status_code=400, detail="Limite indisponível")
 
          
             try:
                 fraud_response = requests.post(
                     "http://antifraude:8004/api/analise",
-                    json={
-                        "id_transacao": transaction.id_transacao,
-                        "id_cartao": transaction.id_cartao,
-                        "valor": transaction.valor,
+                    params={
+                        "id_transacao": id_transacao,
+                        "id_cartao": id_cartao,
+                        "valor": valor,
                         "data_transacao": datetime.now().isoformat()
                     },
                     timeout=5
@@ -123,15 +128,15 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                         (id_transacao, id_cartao, valor, status, data_autorizacao)
                         VALUES ($1, $2, $3, $4, $5)
                         """,
-                        transaction.id_transacao,
-                        transaction.id_cartao,
-                        transaction.valor,
+                        id_transacao,
+                        id_cartao,
+                        valor,
                         'negada',
                         datetime.now()
                     )
                     
                     return AuthorizationResponse(
-                        id_transacao=transaction.id_transacao,
+                        id_transacao=id_transacao,
                         status="negada",
                         mensagem="Transação suspeita identificada"
                     )
@@ -143,9 +148,9 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                     (id_transacao, id_cartao, valor, status, data_autorizacao)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
-                    transaction.id_transacao,
-                    transaction.id_cartao,
-                    transaction.valor,
+                    id_transacao,
+                    id_cartao,
+                    valor,
                     'autorizada',
                     datetime.now()
                 )
@@ -157,12 +162,12 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                     SET limite_disponivel = limite_disponivel - $1
                     WHERE id_cartao = $2
                     """,
-                    transaction.valor,
-                    transaction.id_cartao
+                    valor,
+                    id_cartao
                 )
 
                 return AuthorizationResponse(
-                    id_transacao=transaction.id_transacao,
+                    id_transacao=id_transacao,
                     status="autorizada",
                     mensagem="Transação autorizada com sucesso"
                 )
@@ -175,9 +180,9 @@ async def authorize_transaction(transaction: AuthorizationRequest):
                     (id_transacao, id_cartao, valor, status, data_autorizacao)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
-                    transaction.id_transacao,
-                    transaction.id_cartao,
-                    transaction.valor,
+                    id_transacao,
+                    id_cartao,
+                    valor,
                     'negada',
                     datetime.now()
                 )
@@ -189,42 +194,28 @@ async def authorize_transaction(transaction: AuthorizationRequest):
 
             if status_autorizacao == "autorizada":
                 
-                async with httpx.AsyncClient() as client:
-                    liquidacao_request = {
-                        "id_transacao": transaction.id_transacao,
-                        "valor": transaction.valor,
+                liquidacao_response = session.post(
+                    "http://liquidacao:8006/api/liquidacao",
+                    params={
+                        "id_transacao": id_transacao,
+                        "valor": valor,
                         "id_autorizacao": id_autorizacao
-                    }
-                    
-                    liquidacao_response = await client.post(
-                        "http://api_liquidacao:8006/api/liquidacao",
-                        json=liquidacao_request
-                    )
-                    
-                    if liquidacao_response.status_code != 200:
-                        raise HTTPException(
-                            status_code=500,
-                            detail="Erro ao processar liquidação"
-                        )
-
-            else:  
-                async with httpx.AsyncClient() as client:
-                    negacao_request = {
-                        "id_transacao": transaction.id_transacao,
+                    },
+                    timeout=5
+                )
+                liquidacao_response.raise_for_status()
+            else:
+               
+                negacao_response = session.post(
+                    "http://negacao:8007/api/negacao",
+                    params={
+                        "id_transacao": id_transacao,
                         "id_autorizacao": id_autorizacao,
-                        "motivo": "Transação não autorizada"  
-                    }
-                    
-                    negacao_response = await client.post(
-                        "http://api_negacao:8007/api/negacao",
-                        json=negacao_request
-                    )
-                    
-                    if negacao_response.status_code != 200:
-                        raise HTTPException(
-                            status_code=500,
-                            detail="Erro ao processar negação"
-                        )
+                        "motivo": "Transação não autorizada"
+                    },
+                    timeout=5
+                )
+                negacao_response.raise_for_status()
 
             return {
                 "id_autorizacao": id_autorizacao,

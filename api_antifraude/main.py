@@ -57,13 +57,18 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
 @app.post("/api/analise")
-async def analyze_transaction(transaction: FraudAnalysisRequest):
+async def transaction(
+    id_transacao: str,
+    id_cartao: str,
+    valor: float,
+    data_transacao: str
+):
     async with pool.acquire() as conn:
         try:
             suspicious_factors = []
             
           
-            if transaction.valor >= 10000:  
+            if valor >= 10000:  
                 suspicious_factors.append("valor_alto")
 
           
@@ -74,15 +79,15 @@ async def analyze_transaction(transaction: FraudAnalysisRequest):
                 WHERE id_cartao = $1 
                 AND data_transacao >= $2
                 """,
-                transaction.id_cartao,
-                datetime.fromisoformat(transaction.data_transacao) - timedelta(hours=1)
+                id_cartao,
+                datetime.fromisoformat(data_transacao) - timedelta(hours=1)
             )
             
             if recent_transactions[0]['count'] >= 5: 
                 suspicious_factors.append("frequencia_alta")
             
             if recent_transactions[0]['total'] and \
-               recent_transactions[0]['total'] + transaction.valor >= 15000:  
+               recent_transactions[0]['total'] + valor >= 15000:  
                 suspicious_factors.append("volume_alto_periodo")
 
           
@@ -93,12 +98,12 @@ async def analyze_transaction(transaction: FraudAnalysisRequest):
                 WHERE id_cartao = $1 
                 AND data_transacao >= $2
                 """,
-                transaction.id_cartao,
-                datetime.fromisoformat(transaction.data_transacao) - timedelta(days=30)
+                id_cartao,
+                datetime.fromisoformat(data_transacao) - timedelta(days=30)
             )
             
             if avg_transaction and avg_transaction['media']:
-                if transaction.valor >= (avg_transaction['media'] * 5):  
+                if valor >= (avg_transaction['media'] * 5):  
                     suspicious_factors.append("padrao_valor_anomalo")
 
            
@@ -110,11 +115,11 @@ async def analyze_transaction(transaction: FraudAnalysisRequest):
                 ORDER BY data_transacao DESC 
                 LIMIT 1
                 """,
-                transaction.id_cartao
+                id_cartao
             )
             
             if last_transaction:
-                time_diff = datetime.fromisoformat(transaction.data_transacao) - \
+                time_diff = datetime.fromisoformat(data_transacao) - \
                            last_transaction['data_transacao']
                 if time_diff.total_seconds() < 30: 
                     suspicious_factors.append("transacoes_rapidas")
@@ -126,10 +131,10 @@ async def analyze_transaction(transaction: FraudAnalysisRequest):
                 (id_transacao, id_cartao, valor, data_transacao)
                 VALUES ($1, $2, $3, $4)
                 """,
-                transaction.id_transacao,
-                transaction.id_cartao,
-                transaction.valor,
-                datetime.fromisoformat(transaction.data_transacao)
+                id_transacao,
+                id_cartao,
+                valor,
+                datetime.fromisoformat(data_transacao)
             )
 
            
@@ -142,14 +147,14 @@ async def analyze_transaction(transaction: FraudAnalysisRequest):
                 (id_transacao, status, fatores_suspeitos, data_analise)
                 VALUES ($1, $2, $3, $4)
                 """,
-                transaction.id_transacao,
+                id_transacao,
                 'suspeita' if is_suspicious else 'normal',
                 json.dumps(suspicious_factors) if suspicious_factors else None,
                 datetime.now()
             )
 
             return {
-                "id_transacao": transaction.id_transacao,
+                "id_transacao": id_transacao,
                 "status": "suspeita" if is_suspicious else "normal",
                 "fatores": suspicious_factors,
                 "data_analise": datetime.now().isoformat()
@@ -163,7 +168,7 @@ async def analyze_transaction(transaction: FraudAnalysisRequest):
                 (id_transacao, status, erro, data_analise)
                 VALUES ($1, $2, $3, $4)
                 """,
-                transaction.id_transacao,
+                id_transacao,
                 'erro',
                 str(e),
                 datetime.now()

@@ -51,12 +51,20 @@ class TransacaoStatus(BaseModel):
     data_atualizacao: datetime
 
 @app.post("/eventos/transacao-iniciada")
-async def handle_transacao_iniciada(event: TransacaoIniciada):
+async def handle_transacao_iniciada(
+    id_transacao: str,
+    id_cartao: str,
+    id_usuario: str,
+    valor: float,
+    data_transacao: str,
+    local_transacao: str,
+    status_transacao: str
+):
     async with pool.acquire() as conn:
         try:
             
             response = session.get(
-                f"http://bacen:8008/bacen/clientes/{event.id_usuario}",
+                f"http://bacen:8008/bacen/clientes/{id_usuario}",
                 timeout=5
             )
             response.raise_for_status()
@@ -70,7 +78,7 @@ async def handle_transacao_iniciada(event: TransacaoIniciada):
                 datetime.now(),
                 json.dumps({
                     "event": "cliente_consultado",
-                    "id_cliente": event.id_usuario,
+                    "id_cliente": id_usuario,
                     "status": "sucesso"
                 })
             )
@@ -78,11 +86,11 @@ async def handle_transacao_iniciada(event: TransacaoIniciada):
            
             auth_response = session.post(
                 "http://autorizacao:8003/api/autorizacao",
-                json={
-                    "id_transacao": event.id_transacao,
-                    "id_cartao": event.id_cartao,
-                    "id_usuario": event.id_usuario,
-                    "valor": event.valor
+                params={
+                    "id_transacao": id_transacao,
+                    "id_cartao": id_cartao,
+                    "id_usuario": id_usuario,
+                    "valor": valor
                 },
                 timeout=5
             )
@@ -97,17 +105,17 @@ async def handle_transacao_iniciada(event: TransacaoIniciada):
                 datetime.now(),
                 json.dumps({
                     "event": "autorizacao_solicitada",
-                    "id_transacao": event.id_transacao
+                    "id_transacao": id_transacao
                 })
             )
 
           
             token_response = session.post(
                 "http://tokenizacao:8002/api/tokenizacao",
-                json={
-                    "id_transacao": event.id_transacao,
-                    "id_cartao": event.id_cartao,
-                    "valor": event.valor
+                params={
+                    "id_transacao": id_transacao,
+                    "id_cartao": id_cartao,
+                    "valor": valor
                 },
                 timeout=5
             )
@@ -122,13 +130,13 @@ async def handle_transacao_iniciada(event: TransacaoIniciada):
                 datetime.now(),
                 json.dumps({
                     "event": "tokenizacao_solicitada",
-                    "id_transacao": event.id_transacao
+                    "id_transacao": id_transacao
                 })
             )
 
             return {
                 "status": "processando",
-                "id_transacao": event.id_transacao
+                "id_transacao": id_transacao
             }
 
         except requests.RequestException as e:
@@ -141,7 +149,7 @@ async def handle_transacao_iniciada(event: TransacaoIniciada):
                 datetime.now(),
                 json.dumps({
                     "event": "erro_processamento",
-                    "id_transacao": event.id_transacao,
+                    "id_transacao": id_transacao,
                     "error": str(e)
                 })
             )
